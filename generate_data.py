@@ -38,6 +38,8 @@ from scipy.interpolate import interp1d
 
 from starrydata_magnetic_utils import (
     classify_magnetic_families, MAGNETIC_PROPERTIES, MAGNETIC_SAMPLE_INFO_KEYS,
+    MAGNETIC_FIELD_PROP_X, MAGNETIZATION_PROP_Y, reorder_hysteresis,
+    evaluate_hysteresis_properties,
 )
 
 # ---------------------------------------------------------------------------
@@ -422,9 +424,49 @@ df_mag_curves_out = df_curves_raw[
     df_curves_raw['prop_y'].isin(MAGNETIC_PROPERTIES)
 ].copy()
 
+# Apply hysteresis reordering to field-vs-magnetization curves
+print('  Reordering hysteresis curves …')
+df_mag_curves_out['H_down'] = ''
+df_mag_curves_out['M_down'] = ''
+df_mag_curves_out['H_up'] = ''
+df_mag_curves_out['M_up'] = ''
+df_mag_curves_out['is_hysteresis'] = ''
+df_mag_curves_out['Hc_down'] = np.nan
+df_mag_curves_out['Hc_up'] = np.nan
+df_mag_curves_out['Hc'] = np.nan
+df_mag_curves_out['Ms'] = np.nan
+
+for idx in tqdm.tqdm(df_mag_curves_out.index):
+    prop_x = df_mag_curves_out.at[idx, 'prop_x']
+    prop_y = df_mag_curves_out.at[idx, 'prop_y']
+    if prop_x not in MAGNETIC_FIELD_PROP_X or prop_y not in MAGNETIZATION_PROP_Y:
+        continue
+    try:
+        a_H = np.array(eval(df_mag_curves_out.at[idx, 'x']))
+        a_M = np.array(eval(df_mag_curves_out.at[idx, 'y']))
+        result = reorder_hysteresis(a_H, a_M)
+        if result is None:
+            continue
+        df_mag_curves_out.at[idx, 'H_down'] = str(result['H_down'].tolist())
+        df_mag_curves_out.at[idx, 'M_down'] = str(result['M_down'].tolist())
+        df_mag_curves_out.at[idx, 'H_up'] = str(result['H_up'].tolist())
+        df_mag_curves_out.at[idx, 'M_up'] = str(result['M_up'].tolist())
+        df_mag_curves_out.at[idx, 'is_hysteresis'] = result['is_hysteresis']
+        props = evaluate_hysteresis_properties(
+            result['H_down'], result['M_down'],
+            result['H_up'], result['M_up'])
+        df_mag_curves_out.at[idx, 'Hc_down'] = props['Hc_down']
+        df_mag_curves_out.at[idx, 'Hc_up'] = props['Hc_up']
+        df_mag_curves_out.at[idx, 'Hc'] = props['Hc']
+        df_mag_curves_out.at[idx, 'Ms'] = props['Ms']
+    except Exception:
+        pass
+
 cols_mag_curves = [
     'SID', 'DOI', 'composition', 'sample_id', 'figure_id',
     'prop_x', 'prop_y', 'unit_x', 'unit_y', 'x', 'y', 'project_names',
+    'H_down', 'M_down', 'H_up', 'M_up', 'is_hysteresis',
+    'Hc_down', 'Hc_up', 'Hc', 'Ms',
 ]
 df_mag_curves_out = df_mag_curves_out.reindex(columns=cols_mag_curves)
 df_mag_curves_out.to_csv(OUT_DIR + 'df_mag_curves.csv', index=False)

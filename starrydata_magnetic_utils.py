@@ -72,6 +72,20 @@ MAGNETIC_SAMPLE_INFO_KEYS = [
     'remanence magnetion',
 ]
 
+MAGNETIC_FIELD_PROP_X = [
+    'Magnetic field strength (H)',
+    'Magnetic field',
+    'Magnetic Field',
+    'Applied Field',
+    'magnetic field',
+]
+
+MAGNETIZATION_PROP_Y = [
+    'magnetization_per_weight',
+    'magnetization_per_volume',
+    'Magnetization',
+]
+
 
 # =============================================================================
 # 2. Data loading
@@ -515,38 +529,14 @@ def sampleplot(df, sampleid, col_H=COL_H, col_M=COL_M,
     mx = 0.1 * (xmax - xmin)
     my = 0.1 * (ymax - ymin)
 
-    # Determine sweep direction: 0 = H decreasing, 1 = H increasing
-    df_plot['side'] = 0
-    for i in df_plot.index:
-        try:
-            if df_plot.at[i, col_H] > df_plot.at[i - 1, col_H]:
-                df_plot.at[i, 'side'] = 1
-            # Fix single-point direction glitches
-            if (i >= 2
-                    and df_plot.at[i, 'side'] == df_plot.at[i - 2, 'side']
-                    and df_plot.at[i, 'side'] != df_plot.at[i - 1, 'side']):
-                df_plot.at[i - 1, 'side'] = df_plot.at[i, 'side']
-        except Exception:
-            pass
-
-    df_up = df_plot[df_plot['side'] == 1].copy()
-    df_down = df_plot[df_plot['side'] == 0].copy()
-
-    # Extend branches to cover overlapping range
-    if len(df_up) > 0 and len(df_down) > 0:
-        xmax_up = df_up[col_H].max()
-        xmin_up = df_up[col_H].min()
-        xmax_down = df_down[col_H].max()
-        xmin_down = df_down[col_H].min()
-
-        if xmax_up < xmax_down:
-            df_up = pd.concat([df_up, df_down[df_down[col_H] > xmax_up].sort_values(col_H)])
-        if xmax_down < xmax_up:
-            df_down = pd.concat([df_up[df_up[col_H] > xmax_down].sort_values(col_H, ascending=False), df_down])
-        if xmin_down < xmin_up:
-            df_up = pd.concat([df_down[df_down[col_H] < xmin_up].sort_values(col_H), df_up])
-        if xmin_up < xmin_down:
-            df_down = pd.concat([df_down, df_up[df_up[col_H] < xmin_down].sort_values(col_H, ascending=False)])
+    # Separate into up/down branches using reorder_hysteresis
+    result = reorder_hysteresis(df_plot[col_H].values, df_plot[col_M].values)
+    if result is not None:
+        df_up = pd.DataFrame({col_H: result['H_up'], col_M: result['M_up']})
+        df_down = pd.DataFrame({col_H: result['H_down'], col_M: result['M_down']})
+    else:
+        df_up = pd.DataFrame(columns=[col_H, col_M])
+        df_down = pd.DataFrame(columns=[col_H, col_M])
 
     # Plot
     fig, ax = plt.subplots(figsize=figsize, tight_layout=True)
@@ -758,3 +748,145 @@ def prepare_magnetic_samples(df_mag):
             pass
 
     return df_mag
+
+
+def reorder_hysteresis(a_H, a_M):
+    """Separate a hysteresis loop into sorted up and down branches.
+
+    Traces the hysteresis loop as a continuous path using nearest-neighbor
+    in normalized (H, M) space. Starting from the top-right (max H, max M),
+    the loop follows the upper curve with H decreasing to the bottom-left,
+    then the lower curve with H increasing back to the top-right. The path
+    is split at the minimum-H turning point into down and up branches.
+
+    Parameters:
+        a_H (array-like): Magnetic field values
+        a_M (array-like): Magnetization values
+
+    Returns:
+        dict: Keys 'H_up', 'M_up' (ascending H), 'H_down', 'M_down'
+            (descending H), 'is_hysteresis' (bool).
+            Returns None for degenerate input (<2 points).
+    """
+    a_H = np.asarray(a_H, dtype=float)
+    a_M = np.asarray(a_M, dtype=float)
+    n = len(a_H)
+
+    if n < 2:
+        return None
+
+    H_range = a_H.max() - a_H.min()
+    M_range = a_M.max() - a_M.min()
+
+    # Degenerate: no spread in H or M
+    if H_range == 0 or M_range == 0:
+        order = np.argsort(a_H)
+        return {
+            'H_up': a_H[order],
+            'M_up': a_M[order],
+            'H_down': np.array([], dtype=float),
+            'M_down': np.array([], dtype=float),
+            'is_hysteresis': False,
+        }
+
+    # Normalize to [0, 1]
+    H_norm = (a_H - a_H.min()) / H_range
+    M_norm = (a_M - a_M.min()) / M_range
+
+    # Start from the point closest to top-right (max H, max M)
+    start_dist = (H_norm - 1.0) ** 2 + (M_norm - 1.0) ** 2
+    start_idx = np.argmin(start_dist)
+
+    # Nearest-neighbor traversal in normalized space
+    order = np.empty(n, dtype=int)
+    order[0] = start_idx
+    visited = np.zeros(n, dtype=bool)
+    visited[start_idx] = True
+
+    for step in range(1, n):
+        cur = order[step - 1]
+        dists = (H_norm - H_norm[cur]) ** 2 + (M_norm - M_norm[cur]) ** 2
+        dists[visited] = np.inf
+        nearest = np.argmin(dists)
+        order[step] = nearest
+        visited[nearest] = True
+
+    H_ordered = a_H[order]
+    M_ordered = a_M[order]
+
+    # Split at the minimum-H turning point
+    min_H_pos = np.argmin(H_ordered)
+
+    # Down branch: top-right → bottom-left (H descending)
+    H_down = H_ordered[:min_H_pos + 1]
+    M_down = M_ordered[:min_H_pos + 1]
+
+    # Up branch: bottom-left → top-right (H ascending)
+    H_up = H_ordered[min_H_pos:]
+    M_up = M_ordered[min_H_pos:]
+
+    is_hysteresis = len(H_down) > 1 and len(H_up) > 1
+
+    return {
+        'H_up': H_up,
+        'M_up': M_up,
+        'H_down': H_down,
+        'M_down': M_down,
+        'is_hysteresis': is_hysteresis,
+    }
+
+
+def evaluate_hysteresis_properties(H_down, M_down, H_up, M_up):
+    """Evaluate coercivity and saturation magnetization from hysteresis branches.
+
+    Parameters:
+        H_down (array-like): Magnetic field values on the down branch
+        M_down (array-like): Magnetization values on the down branch
+        H_up (array-like): Magnetic field values on the up branch
+        M_up (array-like): Magnetization values on the up branch
+
+    Returns:
+        dict: Keys 'Hc_down', 'Hc_up', 'Hc' (coercivity), 'Ms' (saturation
+            magnetization). Values are np.nan when not computable.
+    """
+    H_down = np.asarray(H_down, dtype=float)
+    M_down = np.asarray(M_down, dtype=float)
+    H_up = np.asarray(H_up, dtype=float)
+    M_up = np.asarray(M_up, dtype=float)
+
+    def _find_zero_crossing(H, M):
+        """Find H where M crosses zero via linear interpolation."""
+        if len(H) < 2:
+            return np.nan
+        for i in range(len(M) - 1):
+            if M[i] * M[i + 1] < 0:
+                # Linear interpolation: H at M=0
+                frac = M[i] / (M[i] - M[i + 1])
+                return H[i] + frac * (H[i + 1] - H[i])
+            if M[i] == 0:
+                return H[i]
+        if M[-1] == 0:
+            return H[-1]
+        return np.nan
+
+    Hc_down = _find_zero_crossing(H_down, M_down)
+    Hc_up = _find_zero_crossing(H_up, M_up)
+
+    # Average coercivity
+    if not np.isnan(Hc_down) and not np.isnan(Hc_up):
+        Hc = (abs(Hc_down) + abs(Hc_up)) / 2
+    elif not np.isnan(Hc_down):
+        Hc = abs(Hc_down)
+    elif not np.isnan(Hc_up):
+        Hc = abs(Hc_up)
+    else:
+        Hc = np.nan
+
+    # Saturation magnetization: max |M| across both branches
+    all_M = np.concatenate([
+        M_down[np.isfinite(M_down)] if len(M_down) > 0 else np.array([]),
+        M_up[np.isfinite(M_up)] if len(M_up) > 0 else np.array([]),
+    ])
+    Ms = float(np.max(np.abs(all_M))) if len(all_M) > 0 else np.nan
+
+    return {'Hc_down': Hc_down, 'Hc_up': Hc_up, 'Hc': Hc, 'Ms': Ms}
