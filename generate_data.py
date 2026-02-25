@@ -1,14 +1,26 @@
 #!/usr/bin/env python
-"""Generate processed data files for the Starrydata Explorer Streamlit app.
+"""Generate processed data files for Starrydata thermoelectric and magnetic materials.
+
+Before running, download the latest dataset from Google Drive:
+    1. Download: https://drive.google.com/uc?id=1py40fDLkTW2kcGx-ie7xHxG2Iqisfcuk
+    2. Extract the ZIP to data/starrydata_dataset/
+Or use download_dataset() from starrydata_utils:
+    from starrydata_utils import download_dataset
+    download_dataset('1py40fDLkTW2kcGx-ie7xHxG2Iqisfcuk', 'data/starrydata_dataset')
 
 Input:
-    data/raw/starrydata_dataset_260217/starrydata_curves.csv
-    data/raw/starrydata_dataset_260217/starrydata_samples.csv
+    data/starrydata_dataset/starrydata_curves.csv
+    data/starrydata_dataset/starrydata_samples.csv
+    data/starrydata_dataset/starrydata_papers.csv
 
-Output:
+Output (thermoelectric):
     data/processed/df_curves.csv
     data/processed/df_samples.csv
     data/processed/df_int_{T}K.csv  (T = 100, 200, …, 1000)
+
+Output (magnetic):
+    data/processed/df_mag_samples.csv
+    data/processed/df_mag_curves.csv
 
 Dependencies:
     pip install pymatgen scipy tqdm
@@ -24,10 +36,14 @@ import tqdm
 from pymatgen.core.composition import Composition
 from scipy.interpolate import interp1d
 
+from starrydata_magnetic_utils import (
+    classify_magnetic_families, MAGNETIC_PROPERTIES, MAGNETIC_SAMPLE_INFO_KEYS,
+)
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-RAW_DIR = 'data/raw/starrydata_dataset_260217/'
+RAW_DIR = 'data/starrydata_dataset/'
 OUT_DIR = 'data/processed/'
 
 L_ELEMENT = [
@@ -247,15 +263,18 @@ df_samples['sum_elements'] = df_samples.iloc[:, idx_H:idx_H + 100].sum(axis=1)
 print('  Generating sample_information …')
 df_samples['sample_information'] = df_samples['sample_info'].apply(flatten_dict)
 
-# Keep only samples that have curves and valid compositions
-sample_ids_with_curves = df_curves['sample_id'].drop_duplicates()
-df_samples = df_samples[df_samples['sample_id'].isin(sample_ids_with_curves)]
-df_samples = df_samples[df_samples['sum_elements'] > 0.99]
-
 # Merge paper metadata (first_author, year, journal_short)
 print('  Merging paper metadata …')
 df_papers = load_papers(RAW_DIR)
 df_samples = pd.merge(df_samples, df_papers, on='SID', how='left')
+
+# Save full samples (with compositions) before TE-specific filtering — reused in Step 4
+df_samples_all = df_samples.copy()
+
+# Keep only samples that have TE curves and valid compositions
+sample_ids_with_curves = df_curves['sample_id'].drop_duplicates()
+df_samples = df_samples[df_samples['sample_id'].isin(sample_ids_with_curves)]
+df_samples = df_samples[df_samples['sum_elements'] > 0.99]
 
 cols_samples = (
     ['sample_name', 'sample_id', 'composition', 'SID', 'DOI', 'sample_info']
@@ -336,5 +355,80 @@ for T in TEMPS:
     # Write output
     df_int = df_int[l_col_info + l_col_prop + l_col_calc].drop_duplicates()
     df_int.to_csv(OUT_DIR + f'df_int_{T}K.csv')
+
+# ===========================================================================
+# Step 4 — Process magnetic samples
+# ===========================================================================
+print('\nStep 4: Processing magnetic samples …')
+
+# Filter curves for magnetic materials
+df_mag_curves = df_curves_raw[
+    df_curves_raw['project_names'].str.contains('MagneticMaterials', na=False)
+]
+mag_sample_ids = df_mag_curves['sample_id'].drop_duplicates()
+
+# Filter samples to magnetic ones (reuse df_samples_all from Step 2 with compositions)
+df_mag_samples = df_samples_all[df_samples_all['sample_id'].isin(mag_sample_ids)].copy()
+df_mag_samples = df_mag_samples[df_mag_samples['sum_elements'] > 0.99]
+
+# Build d_comp dicts from element columns (needed by classify_magnetic_families)
+print('  Building composition dicts …')
+df_mag_samples['d_comp'] = df_mag_samples[L_ELEMENT].apply(
+    lambda row: row.to_dict(), axis=1)
+
+# Classify magnetic material families
+print('  Classifying magnetic families …')
+df_mag_samples = classify_magnetic_families(df_mag_samples)
+
+# Extract sample info keys
+print('  Extracting sample info fields …')
+for key in MAGNETIC_SAMPLE_INFO_KEYS:
+    df_mag_samples[key] = ''
+    df_mag_samples[key + '_details'] = ''
+
+for i in tqdm.tqdm(df_mag_samples.index):
+    try:
+        d_si = eval(df_mag_samples.at[i, 'sample_info'])
+    except Exception:
+        continue
+    for key in MAGNETIC_SAMPLE_INFO_KEYS:
+        try:
+            df_mag_samples.at[i, key] = d_si[key]['category']
+            df_mag_samples.at[i, key + '_details'] = d_si[key]['comment']
+        except Exception:
+            pass
+
+# Output columns
+cols_mag_samples = (
+    ['sample_name', 'sample_id', 'composition', 'SID', 'DOI', 'sample_info']
+    + L_ELEMENT
+    + ['sum_elements', 'sample_information']
+    + L_PAPER_META
+    + ['mf_if']
+    + MAGNETIC_SAMPLE_INFO_KEYS
+    + [k + '_details' for k in MAGNETIC_SAMPLE_INFO_KEYS]
+)
+df_mag_samples_out = df_mag_samples.reindex(columns=cols_mag_samples)
+df_mag_samples_out.to_csv(OUT_DIR + 'df_mag_samples.csv', index=False)
+print(f'  -> {OUT_DIR}df_mag_samples.csv  ({len(df_mag_samples_out)} rows)')
+
+
+# ===========================================================================
+# Step 5 — Process magnetic curves
+# ===========================================================================
+print('\nStep 5: Processing magnetic curves …')
+
+df_mag_curves_out = df_curves_raw[
+    df_curves_raw['prop_y'].isin(MAGNETIC_PROPERTIES)
+].copy()
+
+cols_mag_curves = [
+    'SID', 'DOI', 'composition', 'sample_id', 'figure_id',
+    'prop_x', 'prop_y', 'unit_x', 'unit_y', 'x', 'y', 'project_names',
+]
+df_mag_curves_out = df_mag_curves_out.reindex(columns=cols_mag_curves)
+df_mag_curves_out.to_csv(OUT_DIR + 'df_mag_curves.csv', index=False)
+print(f'  -> {OUT_DIR}df_mag_curves.csv  ({len(df_mag_curves_out)} rows)')
+
 
 print('\nDone! All files written to', OUT_DIR)

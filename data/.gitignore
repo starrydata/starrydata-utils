@@ -1,0 +1,4 @@
+# Ignore all data files (downloaded and generated)
+*
+# But keep this .gitignore and the directory structure
+!.gitignore

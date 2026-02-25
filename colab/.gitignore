@@ -1,0 +1,2 @@
+# Generated notebooks — regenerate with: python build_notebook.py
+*.ipynb

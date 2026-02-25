@@ -2,6 +2,7 @@
 """Build 260222_starrydata_utils.ipynb from starrydata_utils.py."""
 
 import json
+import os
 import uuid
 
 def md(source):
@@ -323,7 +324,8 @@ notebook = {
     "cells": cells
 }
 
-with open('260222_starrydata_utils.ipynb', 'w') as f:
+os.makedirs('colab', exist_ok=True)
+with open('colab/260222_starrydata_utils.ipynb', 'w') as f:
     json.dump(notebook, f, indent=1, ensure_ascii=False)
 
 print(f'Generated notebook with {len(cells)} cells '
